@@ -13,6 +13,7 @@ module Segment
       #
       # attrs - Hash
       #           :write_key         - String of your project's write_key
+      #           :additional_sinks  - Array of extra sinks we should issue events to
       #           :max_queue_size - Fixnum of the max calls to remain queued (optional)
       #           :on_error       - Proc which handles error calls from the API
       def initialize attrs = {}
@@ -20,6 +21,8 @@ module Segment
 
         @queue = Queue.new
         @write_key = attrs[:write_key]
+        # sink object should define identify and track methods
+        @additional_sinks = Array(attrs[:additional_sinks])
         @max_queue_size = attrs[:max_queue_size] || Defaults::Queue::MAX_SIZE
         @options = attrs
         @worker_mutex = Mutex.new
@@ -289,6 +292,9 @@ module Segment
       #
       # returns Boolean of whether the item was added to the queue.
       def enqueue(action)
+        # send action to additional sinks
+        send_to_additional_sinks(action)
+
         # add our request id for tracing purposes
         action[:messageId] = uid
         unless queue_full = @queue.length >= @max_queue_size
@@ -296,6 +302,57 @@ module Segment
           @queue << action
         end
         !queue_full
+      end
+
+      # private: Sends events to additional sinks
+      #
+      # action  - Hash of event/action properties
+      #
+      def send_to_additional_sinks(action)
+        # action_type is assumed to be either identify and track
+        action_type, payload = extract_action_type_and_payload(action)
+
+        @additional_sinks.each do |sink|
+          sink.public_send(action_type, payload)
+        end
+      end
+
+      # private: Extracts type and generic payload
+      #
+      # action  - Hash of event/action properties
+      #
+      def extract_action_type_and_payload(action)
+        action_type = action[:type]
+
+        # remove analytics specific properties
+        payload = action.except(
+          :userId,
+          :anonymousId,
+          :integrations,
+          :context,
+          :type,
+          :options,
+          :timestamp)
+
+        return action_type, flatten_payload(payload)
+      end
+
+      # private: One level hash flattening
+      #
+      # payload  - Hash
+      #
+      def flatten_payload(payload)
+        flat_payload = {}
+
+        payload.each do |key, value|
+          if value.is_a?(Hash)
+            flat_payload.merge!(value)
+          else
+            flat_payload[key] = value
+          end
+        end
+
+        flat_payload
       end
 
       # private: Ensures that a string is non-empty
